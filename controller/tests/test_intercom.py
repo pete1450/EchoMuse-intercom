@@ -441,6 +441,21 @@ def test_suspend_is_idempotent_and_resume_tolerates_a_lost_ack(_two_devices, _no
     _run(go())
 
 
+def test_suspend_during_an_attempt_sends_nothing(_two_devices, _no_events):
+    a, b = _two_devices
+
+    async def go():
+        session = await em_intercom.start_intercom("kitchen", "bedroom")
+        # The device is still ringing — the attempt owns it, no turn
+        # is running, and there is nothing to suspend.
+        a.intercom_state = "ringing"
+        a.intercom_session = session.session_id
+        assert await em_intercom.suspend_intercom(a) is False
+        assert a.send_control.call_count == 1, "only the offer went out"
+        assert em_intercom.INTERCOM.active_for("kitchen") is session
+    _run(go())
+
+
 def test_a_failed_suspend_does_not_fail_the_turn(_two_devices, _no_events):
     a, b = _two_devices
 

@@ -1,10 +1,11 @@
 """
-Intercom sessions and the controller's switchboard (Phase 1).
+Intercom sessions and the controller's switchboard (Phases 1–3), plus
+the Home Assistant entry point (Phase 4).
 
 The controller is the switchboard for intercom calls: it knows both
 devices, creates the session, issues the one-time token, and fans the
 end out to both ends. It never touches call audio — that flows device
-to device in a later phase.
+to device.
 
 Two layers, one module. The session state (IntercomSession,
 IntercomRegistry) is pure, like em_barge and em_pacing: no sockets, so
@@ -16,6 +17,12 @@ itself may import em_controller by name (a second copy gets loaded),
 so anything the dashboard needs to call must live in a module that
 does not. em_controller owns only the device's own state reports
 (_on_intercom_state) and the in-call guards.
+
+The third layer is the Home Assistant entry point (execute_service):
+the ESPHome user-defined services each Echo exposes (drop_in,
+hang_up) call into the same switchboard, so a sentence automation
+starts and ends calls with no custom integration. The services live
+in em_esphome; the decision lives here, where it is testable.
 """
 
 import asyncio
@@ -160,8 +167,9 @@ async def start_intercom(caller_id: str, callee_id: str) -> IntercomSession:
     Both must be connected, intercom-capable, not muted, not in a voice
     turn and not already in a call. The offer goes to both devices with
     the role each plays and the other's intercom listener address: the
-    callee rings and dials the caller on its button, the caller waits
-    to be dialled. The token travels with the offer for the dialler to
+    callee rings and dials the caller on its button — or answers itself
+    when Allow drop-in is on for that Echo — and the caller waits to be
+    dialled. The token travels with the offer for the dialler to
     present.
 
     Raises IntercomError for anything that cannot start.
@@ -255,6 +263,44 @@ async def end_intercom_for_device(device, reason: str = "hangup") -> IntercomSes
     if session is None:
         return None
     return await end_intercom(session.session_id, reason)
+
+
+async def execute_service(device_id: str, service: str,
+                          args: dict) -> tuple[bool, str]:
+    """Run a Home Assistant user-defined service for one Echo.
+
+    The ESPHome services each Echo exposes (drop_in, hang_up — see
+    em_esphome) are the Home Assistant entry point for intercom: a
+    sentence automation calls them, and this is the decision. Returns
+    (True, "") on success, (False, message) on anything that cannot
+    run — the caller reports that back to HA, so a drop-in to an
+    offline Echo fails visibly in the automation instead of ringing
+    into silence.
+
+    drop_in starts a call from this Echo to args["target"], the other
+    Echo's device id. hang_up ends whatever call this Echo is in; with
+    no call it succeeds as a no-op, the same idempotence as ending an
+    ended session. Voice hangup ("Hey EchoMuse, hang up") does not go
+    through here — the STT_END intercept ends the call before HA runs
+    an intent — but an automation or a dashboard button calling
+    hang_up lands in the same place.
+    """
+    if service == "drop_in":
+        target = (args or {}).get("target") or ""
+        if not target:
+            return False, "drop_in needs a target Echo"
+        try:
+            await start_intercom(device_id, target)
+        except IntercomError as e:
+            return False, str(e)
+        return True, ""
+    if service == "hang_up":
+        device = em_state.devices.get(device_id)
+        if device is None:
+            return False, f"{device_id} is offline"
+        await end_intercom_for_device(device, "hangup")
+        return True, ""
+    return False, f"unknown intercom service {service!r}"
 
 
 def wake_action(state: str | None) -> str | None:

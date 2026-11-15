@@ -2468,6 +2468,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                 stockSoundCapable={device.connected && !!device.stockSoundCapable}
                 wakeMicCapable={!device.connected || !!device.wakeMicCapable}
                 sendspinCapable={!device.connected || !!device.sendspinCapable}
+                intercomCapable={!device.connected || !!device.intercomCapable}
                 sendspinPanel={device.connected && device.sendspinCapable
                   ? <SendspinPairing deviceId={device.device_id} status={device.sendspin} isAdmin={isAdmin}/>
                   : null}
@@ -9595,7 +9596,8 @@ const CONFIG_SECTIONS = {
   "ring": ["ledScene", "ledListenColor", "ledThinkColor", "remoteVolumeArc", "meterAttack", "meterDecay", "meterFloor", "meterGamma", "meterRef", "meterCurve"],
   "advanced": ["agcEnabled", "vadThreshold", "vadSpeechMs", "vadSilenceMs", "buttonSingleTapEvent", "buttonMultiTapMs", "consolePassword", "consoleTimeoutMin", "controllerEndpoints"],
   "bluetooth": ["bleProxyEnabled", "bleProxyConnections"],
-  "sendspin": ["sendspinEnabled", "sendspinUnpaired"]
+  "sendspin": ["sendspinEnabled", "sendspinUnpaired"],
+  "intercom": ["allowDropIn"]
 };
 
 // Display labels for the section ids, and the reverse key -> section index
@@ -9603,6 +9605,7 @@ const CONFIG_SECTIONS = {
 const SECTION_LABELS = {
   playback: 'Playback', wakeword: 'Wake word', microphones: 'Microphones',
   ring: 'Ring', advanced: 'Advanced', bluetooth: 'Bluetooth', sendspin: 'Sendspin',
+  intercom: 'Intercom',
 };
 const KEY_SECTION = {};
 Object.entries(CONFIG_SECTIONS).forEach(([sid, keys]) => {
@@ -9760,6 +9763,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                             stockSoundCapable = false,
                             wakeMicCapable = true,
                             sendspinCapable = true, sendspinPanel = null,
+                            intercomCapable = true,
                             bleConnectCapable = true, blePanel = null }) {
   // emosFleet defaults TRUE for the same reason the capability props above do,
   // and for one more: it gates the console password, which is emOS-only, and
@@ -10481,6 +10485,20 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
             disabled={!sendspinCapable || !(config.sendspinEnabled ?? false)}
             value={config.sendspinUnpaired ?? false}
             onChange={v => set('sendspinUnpaired', v)}/>
+        </div>
+      </Stage>
+
+      {/* 08 INTERCOM */}
+      <Stage n="08" title="Intercom"
+        chips={<ScopeChip tone="device">Device</ScopeChip>}
+        desc="Drop-in calls from Home Assistant: another Echo can call this one, and it rings until you tap its action button — or answers itself, with a chime, when Allow drop-in is on. On, its microphone opens to the caller without its own wake word, so it is an explicit opt-in per Echo."
+        scope={scopeEl('intercom')} dim={secStyle('intercom')}>
+        <div className="em-grid2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 var(--space-12)', ...inputStyle }}>
+          <Toggle label="Allow drop-in"
+            sub={intercomCapable ? 'answer drop-in calls automatically, with a chime — the microphone opens without the wake word' : 'needs newer firmware on this Echo'}
+            disabled={!intercomCapable}
+            value={config.allowDropIn ?? false}
+            onChange={v => set('allowDropIn', v)}/>
         </div>
       </Stage>
     </div>

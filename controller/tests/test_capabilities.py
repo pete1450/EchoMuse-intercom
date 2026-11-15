@@ -116,6 +116,19 @@ def test_intercom_capability_is_surfaced_to_the_api():
         "/api/devices must surface the call state"
 
 
+def test_intercom_capability_gates_the_drop_in_toggle():
+    """Allow drop-in must not be offered as a switch on firmware that
+    cannot answer a call (docs/intercom.md). The toggle follows the
+    same capability pattern as the wake-sound and volume-cue switches."""
+    assert "intercom" in device_capabilities(), "firmware no longer announces intercom"
+    assert "intercomCapable" in _device_record(), \
+        "/api/devices must surface the intercom capability"
+    jsx = (ROOT / "controller" / "static" / "dashboard.jsx").read_text()
+    assert "disabled={!intercomCapable}" in jsx, \
+        "the dashboard must gate Allow drop-in on the capability"
+    assert "allowDropIn" in jsx
+
+
 def test_volume_cue_capability_is_surfaced_to_the_dashboard():
     """Old firmware must not be offered a switch it cannot honour."""
     caps = device_capabilities()

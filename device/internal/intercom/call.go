@@ -135,6 +135,13 @@ type Call struct {
 	Port int
 	// RingTimeout overrides DefaultRingTimeout. Tests shorten it.
 	RingTimeout time.Duration
+	// AutoAnswer dials the peer as soon as Start has the listener up,
+	// instead of waiting for the action button. Only the callee can
+	// answer — Answer is a no-op in any other state — so setting it on
+	// the caller is harmless. server.go sets it from the device's
+	// AllowDropIn setting for a callee offer, and plays the chime
+	// itself: the Call owns the dial, server.go owns the notice.
+	AutoAnswer bool
 
 	// OnConnected runs when the peer link is up and audio is flowing.
 	OnConnected func()
@@ -173,7 +180,10 @@ func NewCall(deviceID string, sess Session, machine *Machine, mic MicTap, spk Sp
 
 // Start opens the peer listener and the firewall rule and starts the
 // ring timer. Both ends listen from the offer, so either can be
-// dialled; the callee dials on answer.
+// dialled; the callee dials on answer. With AutoAnswer the callee
+// dials itself as soon as the listener is up — the dial runs on its
+// own goroutine, so Start still returns promptly and the ring timer
+// still bounds the attempt (connected() stops it).
 func (c *Call) Start() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -200,6 +210,12 @@ func (c *Call) Start() error {
 	}
 	c.timer = time.AfterFunc(timeout, func() { c.end("no_answer") })
 	go c.acceptLoop(ln)
+	if c.AutoAnswer {
+		// On its own goroutine: Answer takes c.mu, which Start holds
+		// until it returns. A no-op unless the machine is ringing,
+		// so a caller with the flag set waits to be dialled as usual.
+		go c.Answer()
+	}
 	return nil
 }
 

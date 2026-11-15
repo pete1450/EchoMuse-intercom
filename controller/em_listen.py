@@ -88,6 +88,11 @@ STATE_DIAGNOSTIC = "diagnostic"
 STATE_LEGACY     = "legacy"
 STATE_DEGRADED   = "degraded"
 STATE_UNKNOWN    = "unknown"
+# An intercom call is flowing: the microphone is live to the peer.
+# Reported by the device (listen_state "in_call") while the call
+# flows, and only then — the wake stream underneath is still local,
+# so this is a report override, not a mode. See docs/listening.md.
+STATE_IN_CALL    = "in_call"
 
 
 @dataclass(frozen=True)
@@ -124,6 +129,13 @@ def resolve(configured: str, capabilities, reported: str | None,
         # streams because the mode is "off" would be untrue.
         return ListenView(STATE_DEGRADED, False,
                           reported_reason or "no microphone it can read — speaker only")
+    if reported == "in_call":
+        # A flowing call overrides the configured mode: the microphone
+        # is live to the peer right now, whatever the wake-word mode
+        # says. For a privately listening Echo that is the exception
+        # docs/listening.md exists to name, and the dashboard must
+        # show it rather than keep showing private listening.
+        return ListenView(STATE_IN_CALL, True, "in an intercom call")
     if configured == "off":
         return ListenView(STATE_CONTROLLER, True)
     if configured == "shadow":
@@ -155,6 +167,13 @@ def detector(view: ListenView, trigger_capable: bool) -> str | None:
     if view.state == STATE_DEGRADED:
         return None
     if view.state == STATE_LOCAL:
+        return DETECT_DEVICE
+    if view.state == STATE_IN_CALL:
+        # The wake-word scorer keeps running during a call — that is
+        # what makes a nested turn (and a voice hangup) possible — so
+        # an Echo in a call still claims wakes from its own detector.
+        # The value only feeds the arbitration hold count, where a
+        # controller-scored Echo in a call counts the same way.
         return DETECT_DEVICE
     if view.state == STATE_LEGACY:
         # "on" against firmware that cannot act is scored here (em_shadow).

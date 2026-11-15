@@ -47,6 +47,28 @@ def test_an_echo_with_no_mic_is_degraded_in_every_mode():
     assert L.resolve("off", set(), None).state == L.STATE_CONTROLLER
 
 
+def test_a_call_is_reported_as_listening_to_the_peer():
+    """An in_call report overrides the configured mode: the microphone
+    is live to the peer right now, and the dashboard must show that
+    rather than keep showing private listening."""
+    v = L.resolve("on", NEW, "in_call")
+    assert v.state == L.STATE_IN_CALL and v.streams is True
+    assert "intercom" in v.reason
+    assert not v.private
+    # It wins in every mode — the device is reporting what it is
+    # doing, not what was configured.
+    assert L.resolve("off", NEW, "in_call").state == L.STATE_IN_CALL
+    assert L.resolve("shadow", NEW, "in_call").state == L.STATE_IN_CALL
+    # But a board with no mic still cannot be in a call.
+    assert L.resolve("on", NEW - {"mic"}, "in_call").state == L.STATE_DEGRADED
+
+
+def test_fleet_summary_counts_a_call_as_streaming():
+    views = [L.resolve("on", NEW, "in_call"), L.resolve("on", NEW, "local")]
+    s = L.fleet_summary(views)
+    assert s["streaming"] == 1 and s["private"] == 1
+
+
 def test_old_firmware_is_shown_streaming():
     v = L.resolve("on", OLD, "local")   # a stray report must not override
     assert v.state == L.STATE_LEGACY and v.streams is True
@@ -332,6 +354,10 @@ def test_detector_by_state():
     assert L.detector(V(L.STATE_LEGACY, True), False) == "controller"
     assert L.detector(V(L.STATE_DEGRADED, False), True) is None
     assert L.detector(V(L.STATE_UNKNOWN, None), True) == "unknown"
+    # An Echo in a call still claims wakes from its own detector —
+    # the scorer keeps running, which is what makes a nested turn
+    # (and a voice hangup) possible.
+    assert L.detector(V(L.STATE_IN_CALL, True), True) == "device"
 
 
 def test_hold_whenever_two_or_more_echoes_can_claim():

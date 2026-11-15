@@ -56,6 +56,11 @@ DEFAULT_DEVICE_CONFIG = {
     # first, because the ring is the only other sign the Echo is listening.
     "wakeSound":        False,
     "wakeSoundLevel":   "medium",   # quiet / medium / loud, played by the Echo
+    # allowDropIn: an incoming intercom call is answered without the
+    # action button. Off by default — on, the callee's microphone opens
+    # to the peer without its own wake word, so it is an explicit
+    # per-Echo opt-in (docs/listening.md, docs/intercom.md).
+    "allowDropIn":      False,
     # Physical-button volume preview (#637). On by default, matching Alexa's
     # familiar feedback and giving a useful level reference while idle.
     "volumeButtonSound": True,

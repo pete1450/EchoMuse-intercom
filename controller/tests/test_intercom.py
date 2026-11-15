@@ -1,5 +1,5 @@
 """
-Intercom sessions and the controller's switchboard (Phases 1–3).
+Intercom sessions and the controller's switchboard (Phases 1–4).
 
 The registry rules are tested against the pure module; the controller
 wiring is tested against em_controller with fake devices, the way
@@ -18,6 +18,7 @@ _oww_stub.install()
 
 import em_controller  # noqa: E402 — must follow the stub
 import em_intercom  # noqa: E402
+import em_listen  # noqa: E402
 import em_state  # noqa: E402
 
 
@@ -127,6 +128,26 @@ def test_a_state_for_an_unknown_session_is_ignored(_no_events):
     _run(em_controller._on_intercom_state(d, {
         "type": "intercom_state", "state": "loud"}))
     assert d.intercom_state is None, "an unknown state is ignored"
+
+
+def test_an_in_call_report_shows_in_the_listen_view(_no_events):
+    """The callee reports its call the way it reports listening today:
+    listen_state carries in_call, and the dashboard reads it off the
+    same view — no second report, no new field."""
+    device = em_controller.Device(
+        "dev1", "10.0.0.1",
+        ["mic", "oww_shadow", "oww_trigger", "oww_local_only", "intercom"],
+        None)
+
+    async def go():
+        await em_controller._on_listen_state(
+            device, {"type": "listen_state", "state": "in_call",
+                     "reason": "intercom call"})
+        view = device.listen_view
+        assert view.state == em_listen.STATE_IN_CALL
+        assert view.streams is True
+        assert view.private is False
+    _run(go())
 
 
 def test_intercom_state_is_in_the_control_table():
@@ -581,3 +602,76 @@ def test_a_turn_not_in_a_call_suspends_nothing(_two_devices, _no_events, monkeyp
     assert "intercom_suspend" not in types_sent
     assert "intercom_resume" not in types_sent
     assert satellite._on_stt_end is not None, "the hook is wired per turn, call or not"
+
+
+# ── Home Assistant services (Phase 4) ─────────────────────────────────────
+
+def test_drop_in_service_starts_a_call(_two_devices, _no_events):
+    a, b = _two_devices
+
+    async def go():
+        ok, error = await em_intercom.execute_service(
+            "kitchen", "drop_in", {"target": "bedroom"})
+        assert (ok, error) == (True, "")
+        session = em_intercom.INTERCOM.active_for("kitchen")
+        assert session is not None and session.callee_id == "bedroom"
+        assert a.send_control.call_count == 1
+        assert b.send_control.call_count == 1
+    _run(go())
+
+
+def test_drop_in_service_needs_a_target(_two_devices, _no_events):
+    async def go():
+        for args in ({}, {"target": ""}, {"target": None}):
+            ok, error = await em_intercom.execute_service("kitchen", "drop_in", args)
+            assert ok is False and "target" in error
+        assert em_intercom.INTERCOM.active_sessions() == []
+    _run(go())
+
+
+def test_drop_in_service_reports_an_unreachable_target(_two_devices, _no_events):
+    async def go():
+        ok, error = await em_intercom.execute_service(
+            "kitchen", "drop_in", {"target": "attic"})
+        assert ok is False and "attic" in error
+        ok, error = await em_intercom.execute_service(
+            "kitchen", "drop_in", {"target": "kitchen"})
+        assert ok is False and "itself" in error
+    _run(go())
+
+
+def test_hang_up_service_ends_the_call(_two_devices, _no_events):
+    a, b = _two_devices
+
+    async def go():
+        session = await em_intercom.start_intercom("kitchen", "bedroom")
+        ok, error = await em_intercom.execute_service("bedroom", "hang_up", {})
+        assert (ok, error) == (True, "")
+        assert em_intercom.INTERCOM.active_for("kitchen") is None
+        for device in (a, b):
+            assert device.send_control.call_args.args[0]["type"] == "intercom_end"
+    _run(go())
+
+
+def test_hang_up_service_with_no_call_is_a_noop(_two_devices, _no_events):
+    a, b = _two_devices
+
+    async def go():
+        ok, error = await em_intercom.execute_service("kitchen", "hang_up", {})
+        assert (ok, error) == (True, "")
+    _run(go())
+    assert a.send_control.call_count == 0
+
+
+def test_hang_up_service_for_an_offline_echo_fails(_two_devices, _no_events):
+    async def go():
+        ok, error = await em_intercom.execute_service("attic", "hang_up", {})
+        assert ok is False and "offline" in error
+    _run(go())
+
+
+def test_an_unknown_service_fails(_two_devices, _no_events):
+    async def go():
+        ok, error = await em_intercom.execute_service("kitchen", "explode", {})
+        assert ok is False and "explode" in error
+    _run(go())

@@ -2,6 +2,7 @@ package intercom
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"sync"
 	"testing"
@@ -140,6 +141,12 @@ type twoCalls struct {
 	micCallee      *fakeMic
 	spkCaller      *fakeSpeaker
 	spkCallee      *fakeSpeaker
+	// endedCaller / endedCallee report each end's OnEnded reason.
+	// They are wired here, before Start, because the ring timer and
+	// the peer-disconnect path read OnEnded from their own goroutines
+	// — assigning it after connect races those reads (CI runs -race).
+	endedCaller chan string
+	endedCallee chan string
 }
 
 // connectTwoCalls offers, starts and answers a call between two
@@ -167,24 +174,31 @@ func connectTwoCalls(t *testing.T, autoAnswer bool) *twoCalls {
 	tc.caller.Port = freePort(t)
 	tc.callee.Port = freePort(t)
 
+	// Both peer addresses are set before either Start. The ports are
+	// already chosen, so the addresses are known without starting —
+	// and they must be: with AutoAnswer the callee dials from Start
+	// itself, so the caller's acceptLoop can read its session while
+	// this function is still between the two Starts. A PeerAddr
+	// written after Start races that read (CI runs -race).
+	tc.caller.sess.PeerAddr = fmt.Sprintf("127.0.0.1:%d", tc.callee.Port)
+	tc.callee.sess.PeerAddr = fmt.Sprintf("127.0.0.1:%d", tc.caller.Port)
+
 	connectedCaller := make(chan struct{}, 1)
 	connectedCallee := make(chan struct{}, 1)
 	tc.caller.OnConnected = func() { connectedCaller <- struct{}{} }
 	tc.callee.OnConnected = func() { connectedCallee <- struct{}{} }
+	tc.endedCaller = make(chan string, 1)
+	tc.endedCallee = make(chan string, 1)
+	tc.caller.OnEnded = func(reason string) { tc.endedCaller <- reason }
+	tc.callee.OnEnded = func(reason string) { tc.endedCallee <- reason }
 
 	if err := tc.caller.Start(); err != nil {
 		t.Fatalf("caller Start: %v", err)
 	}
-	// The callee dials the caller, so its peer address must be set
-	// before it starts — with AutoAnswer the dial fires from Start
-	// itself, and an empty address would fail it before the test
-	// could set it. The caller never dials, so its address can wait.
-	tc.callee.sess.PeerAddr = peerAddr(t, tc.caller)
 	tc.callee.AutoAnswer = autoAnswer
 	if err := tc.callee.Start(); err != nil {
 		t.Fatalf("callee Start: %v", err)
 	}
-	tc.caller.sess.PeerAddr = peerAddr(t, tc.callee)
 
 	if !autoAnswer {
 		// The callee dials the caller on answer.
@@ -232,7 +246,7 @@ func bigFrame() []byte {
 func TestCallFullFlow(t *testing.T) {
 	tc := connectTwoCalls(t, false)
 	mCaller, mCallee := tc.mCaller, tc.mCallee
-	cCaller, cCallee := tc.caller, tc.callee
+	cCaller := tc.caller
 	micCaller, micCallee := tc.micCaller, tc.micCallee
 	spkCaller, spkCallee := tc.spkCaller, tc.spkCallee
 
@@ -266,11 +280,9 @@ func TestCallFullFlow(t *testing.T) {
 
 	// Hanging up one end ends the other with peer_disconnected, and
 	// both machines return to idle.
-	endedCallee := make(chan string, 1)
-	cCallee.OnEnded = func(reason string) { endedCallee <- reason }
 	cCaller.Stop()
 	select {
-	case reason := <-endedCallee:
+	case reason := <-tc.endedCallee:
 		if reason != "peer_disconnected" {
 			t.Fatalf("callee ended with %q, want peer_disconnected", reason)
 		}
@@ -331,6 +343,11 @@ func TestCallAutoAnswerOnCallerIsANoop(t *testing.T) {
 	tc.caller.RingTimeout = 200 * time.Millisecond
 	tc.callee.RingTimeout = 200 * time.Millisecond
 	tc.caller.AutoAnswer = true
+	// OnEnded before Start: the ring timer fires end() from its own
+	// goroutine, which reads OnEnded — assigning it after Start
+	// races that read (CI runs -race).
+	ended := make(chan string, 1)
+	tc.caller.OnEnded = func(reason string) { ended <- reason }
 	if err := tc.caller.Start(); err != nil {
 		t.Fatalf("caller Start: %v", err)
 	}
@@ -341,8 +358,6 @@ func TestCallAutoAnswerOnCallerIsANoop(t *testing.T) {
 		tc.caller.Stop()
 		tc.callee.Stop()
 	})
-	ended := make(chan string, 1)
-	tc.caller.OnEnded = func(reason string) { ended <- reason }
 	select {
 	case reason := <-ended:
 		if reason != "no_answer" {

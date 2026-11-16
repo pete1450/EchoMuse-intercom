@@ -93,6 +93,7 @@ import em_wav
 import em_oww_models
 import em_oww_metadata
 import em_player
+import em_intercom
 import em_tasks
 import em_timers
 import em_turnclock
@@ -264,6 +265,11 @@ AMBIENT_LUX_KEY  = 3   # TSL2540 ambient light, as an HA sensor
 MIC_MUTED_KEY    = 4   # the mic mute button, as a read-only binary sensor (#438)
 CPU_TEMP_KEY     = 5   # the CPU thermal zone (cpuTempC), as an HA sensor
 MAX_TEMP_KEY     = 6   # the hottest thermal zone now (maxTempC), as an HA sensor
+# User-defined service keys. Services share the entity key space (HA keys
+# its registry on them), so they continue the append-only sequence.
+# drop_in starts a call to another Echo; hang_up ends this Echo's call.
+DROP_IN_KEY      = 7
+HANG_UP_KEY      = 8
 
 # Press types the event entity advertises. double/triple were parked because
 # detecting them means delaying the single press by the multi-tap window to
@@ -598,6 +604,34 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         else:
             log.warning(f"[{self._log_name}] mute requested but device not connected")
 
+    async def _run_intercom_service(self, msg) -> None:
+        """Run one HA service call and report its outcome to HA.
+
+        drop_in takes its target from the first (only) argument, the
+        peer Echo's device id, positionally — ExecuteServiceArgument
+        carries no name, so the order is the contract the service
+        listing advertises. hang_up takes none. The response carries
+        success and an error message, never response data
+        (supports_response=False in the listing), so a drop-in to an
+        offline Echo fails visibly in the automation that called it
+        instead of ringing into silence.
+        """
+        services = {DROP_IN_KEY: "drop_in", HANG_UP_KEY: "hang_up"}
+        service = services.get(msg.key)
+        if service is None:
+            log.warning(f"[{self._log_name}] unknown service key {msg.key}")
+            self._send_one(api_pb2.ExecuteServiceResponse(
+                call_id=msg.call_id, success=False,
+                error_message=f"unknown service key {msg.key}"))
+            return
+        args: dict = {}
+        if service == "drop_in":
+            args = {"target": msg.args[0].string_ if msg.args else ""}
+        ok, error = await em_intercom.execute_service(
+            self.device_id, service, args)
+        self._send_one(api_pb2.ExecuteServiceResponse(
+            call_id=msg.call_id, success=ok, error_message=error))
+
     def handle_message(self, msg):
         """
         Handle all messages beyond Hello/Ping/Disconnect/Authentication
@@ -711,7 +745,42 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     name="Microphone Muted",
                     icon="mdi:microphone-off",
                 )
+            # Intercom as Home Assistant services (Phase 4): each Echo
+            # exposes drop_in and hang_up, gated on the intercom
+            # capability, so a sentence automation can call them with no
+            # custom integration. Services are enumerated in the same
+            # ListEntities flow as the entities — HA asks once and gets
+            # both — and the keys continue the append-only sequence.
+            # drop_in takes one argument, target, the other Echo's
+            # device id; hang_up takes none.
+            if self._device_has("intercom"):
+                yield api_pb2.ListEntitiesServicesResponse(
+                    name="drop_in",
+                    key=DROP_IN_KEY,
+                    args=[api_pb2.ListEntitiesServicesArgument(
+                        name="target",
+                        type=api_pb2.SERVICE_ARG_TYPE_STRING,
+                    )],
+                    supports_response=False,
+                )
+                yield api_pb2.ListEntitiesServicesResponse(
+                    name="hang_up",
+                    key=HANG_UP_KEY,
+                    args=[],
+                    supports_response=False,
+                )
             yield api_pb2.ListEntitiesDoneResponse()
+            return
+
+        if isinstance(msg, api_pb2.ExecuteServiceRequest):
+            # A Home Assistant service call on this Echo (drop_in /
+            # hang_up). The work is async — the switchboard sends the
+            # offers — so the response cannot be yielded here: the
+            # task sends it when the service finishes, matched by
+            # call_id. Yield _HANDLED so the loop does not log this
+            # as an unrecognised message in the meantime.
+            em_tasks.spawn(self._run_intercom_service(msg))
+            yield _HANDLED
             return
 
         if isinstance(msg, (api_pb2.SubscribeStatesRequest,

@@ -5079,12 +5079,17 @@ async def _on_oww_wake(device: Device, msg: dict) -> None:
     # controller-triggered one and the Activity tab does not
     # have to special-case which side fired.
     device.shadow.record_cross(msg.get("score"), msg.get("ageMs"))
-    if device.listen_view.streams:
+    if device.listen_view.streams and device.listen_view.state != em_listen.STATE_IN_CALL:
         # Only when this Echo's mic is actually reaching us
         # continuously (#696 review) — a private session's
         # own pre-roll is never fed (see the data-plane 0x07
         # branch), so capturing it here would grab whatever
         # stale audio is left from a PRIOR session instead.
+        # An intercom call streams too (listen_view.streams is
+        # True for it), but to the PEER, not to us — a wake
+        # sample captured during a call would be that same
+        # stale audio, so a call is excluded here even though
+        # the mic is live.
         _consider_on_device_wake_sample(
             device, msg, msg.get("threshold")
         )

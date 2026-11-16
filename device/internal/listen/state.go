@@ -2,10 +2,18 @@ package listen
 
 // State values, reported to the controller as listen_state. The DataClient
 // holds the same strings as its ListenStream/ListenLocal/ListenDegraded.
+//
+// StateInCall is NOT one of the wake-stream states Resolve returns, and
+// must never be passed to SetListenState: it is only a REPORT, sent while
+// a call flows, saying the microphone is live to the peer. The wake
+// stream underneath is still local (the scorer keeps running), so the
+// resolved state is unchanged — the report is overridden at the point
+// it is sent, and restored when the call ends.
 const (
 	StateStream   = "stream"
 	StateLocal    = "local"
 	StateDegraded = "degraded"
+	StateInCall   = "in_call"
 )
 
 // Resolve decides what the device does with its wake stream.

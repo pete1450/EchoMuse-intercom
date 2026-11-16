@@ -67,6 +67,10 @@ KINDS: dict[str, str] = {
     "sendspinUnpaired": BOOL,
     "wakeSound": BOOL,
     "wakeSoundLevel": STR,
+    # allowDropIn: the device answers an incoming intercom call
+    # itself (docs/intercom.md). Off by default — on, the callee's
+    # microphone opens to the peer without its own wake word.
+    "allowDropIn": BOOL,
     "volumeButtonSound": BOOL,
     "remoteVolumeArc": BOOL,
     "eqBands": FLOAT_LIST,

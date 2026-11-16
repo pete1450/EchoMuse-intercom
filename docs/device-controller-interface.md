@@ -181,7 +181,7 @@ absent optional fields take prior/default behaviour.
 | `volume_state` | `level` | Volume changed; controller persists it as `startupVolume` |
 | `oww_shadow_cross` | score/threshold/age fields | Shadow-mode wake crossing (report only) |
 | `oww_wake` | `score`, `threshold`, `ageMs`, `capturedMono`; `level`, `peak` when the crossing frame is still buffered; under private listening also `session`, `floor`, `barge` | On-device trigger fired (`owwOnDevice=on`). With `session` it opened a private-listening session whose audio follows as `0x07` ([listening.md](listening.md)); without, it lands in `Device.pending_wake` and the continuous stream carries the audio. `level`/`peak` are the wake word's loudness in dBFS with `micGainDb` removed, over the 2.0s ending at the crossing frame (definition: `controller/em_wakelevel.py`); logged, not acted on |
-| `listen_state` | `state` (`local`/`stream`/`degraded`), `reason?` | What the device is doing with its wake stream. Sent on every change and after every `ack` |
+| `listen_state` | `state` (`local`/`stream`/`degraded`/`in_call`), `reason?` | What the device is doing with its wake stream. Sent on every change and after every `ack` |
 | `listen_end` | `session`, `reason` | The device closed a session itself (`ack_timeout`, `max_open`, `muted`, `link`, `stopped`) |
 | `ambient_light` | `lux` | Light reading, sent on a real change (only if `ambient_light`); the ~30s `stats` report carries it as `ambientLux` |
 | `stats` | hardware and link telemetry (`internal/client/stats.go`, `DeviceStats`) | Every ~30s, plus once on connect. Every field is optional and absence means **not measured**, never zero. `tcpUpRetrans` is the device's own TCP retransmits across its planes since the last report, `tcpUpSegs` the segments sent where the kernel counts them (FireOS 5's 3.18 does not); `ble` carries the scanner's counters, including `yields`/`yieldedMs` for time the scan stood aside for the link |
@@ -397,7 +397,8 @@ meterAttack, meterDecay, meterFloor, meterGamma, meterRef, meterCurve,
 wakeArbitrationMs, duckDb, responseLevel,
 buttonSingleTapEvent, buttonMultiTapMs,
 owwOnDevice, saveUtterances, streamReply,
-wakeSound, wakeSoundLevel, volumeButtonSound
+wakeSound, wakeSoundLevel, volumeButtonSound,
+allowDropIn
 ```
 
 `wakeWordEnabled` is sent on its own, not with the stored config: it is

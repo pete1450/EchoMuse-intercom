@@ -635,7 +635,8 @@ func main() {
 		// The features just arrived on the ack, and a restarted controller
 		// has no record of what this device is doing — so resolve and report
 		// unconditionally.
-		syncListenState(dataClient, controlClient, true)
+		syncListenState(dataClient, controlClient, true,
+			intercomMachine.State() == intercom.StateInCall)
 		if s.VolumeSeeded() {
 			controlClient.SendVolumeState(s.VolumeLevel())
 		}
@@ -690,7 +691,8 @@ func main() {
 		applyBleConfig(bleScanner, bleBridge)
 		applySendspinConfig(pcmSpeaker, controlClient, s, deviceID)
 		applyShadowConfig(dataClient, controlClient, pcmSpeaker, s)
-		syncListenState(dataClient, controlClient, false)
+		syncListenState(dataClient, controlClient, false,
+			intercomMachine.State() == intercom.StateInCall)
 	})
 
 	// Wake sound on request (#120), for wakes outside a private-listening
@@ -719,7 +721,8 @@ func main() {
 	})
 
 	// Intercom — the mode switch (Phases 1–2). An offer starts a call
-	// attempt: the callee rings and waits for its button, the caller
+	// attempt: the callee rings and waits for its button — or answers
+	// itself when Allow drop-in is on for that Echo — and the caller
 	// waits to be dialled. Both ends listen from the offer, so either
 	// can be dialled; the callee dials on answer, and the peer link
 	// carries raw 48 kHz PCM both ways until one end hangs up.
@@ -748,7 +751,13 @@ func main() {
 		// already entered ringing or calling above. Audio flows on the
 		// DataClient's post-AEC mono tap — the same mono STT hears —
 		// and out through the voice plane.
+		// Allow drop-in: a callee with the setting on answers itself
+		// on the offer instead of ringing for the button. The caller
+		// never auto-answers — it waits to be dialled as usual — and
+		// the Call's Answer is a no-op outside ringing anyway.
+		autoAnswer := sess.Role == intercom.RoleCallee && config.Get().AllowDropIn
 		call := intercom.NewCall(deviceID, sess, intercomMachine, dataClient, pcmSpeaker)
+		call.AutoAnswer = autoAnswer
 		call.OnConnected = func() {
 			// Solid green: the pulse was the attempt, the solid ring
 			// is the call.
@@ -756,6 +765,10 @@ func main() {
 				Pattern: "solid", Colors: [][3]uint8{{0, 255, 0}},
 			})
 			_ = controlClient.SendIntercomState(intercom.StateInCall, offer.Session, "")
+			// The microphone is live to the peer now: report it in
+			// listen_state, so the controller does not keep showing
+			// this Echo as privately listening while it streams.
+			syncListenState(dataClient, controlClient, true, true)
 		}
 		call.OnEnded = func(reason string) {
 			// The peer went away, the ring timed out, or the dial
@@ -764,6 +777,8 @@ func main() {
 			// session for both ends (the other side gets intercom_end).
 			s.StartAnim(server.AnimSpec{Pattern: "off"})
 			_ = controlClient.SendIntercomState(intercom.StateIdle, offer.Session, reason)
+			// The call is over: report the true wake-stream state again.
+			syncListenState(dataClient, controlClient, true, false)
 			intercomCall = nil
 		}
 		if err := call.Start(); err != nil {
@@ -774,11 +789,19 @@ func main() {
 			return
 		}
 		intercomCall = call
-		// Slow green pulse while the call is being attempted: distinct
-		// from the cyan listening ring and the white thinking ring,
-		// and readable from across a room.
+		// The attempt ring: a slow green pulse while ringing or
+		// waiting to be dialled — distinct from the cyan listening
+		// ring and the white thinking ring, and readable from across
+		// a room. An auto-answered callee gets a FAST pulse instead,
+		// so anyone in the room can tell this call answered itself;
+		// the chime is the audible half of the same notice.
+		periodMs := 2000
+		if autoAnswer {
+			periodMs = 500
+			playIntercomChime(pcmSpeaker)
+		}
 		s.StartAnim(server.AnimSpec{
-			Pattern: "pulse", Colors: [][3]uint8{{0, 255, 0}}, PeriodMs: 2000,
+			Pattern: "pulse", Colors: [][3]uint8{{0, 255, 0}}, PeriodMs: periodMs,
 		})
 		_ = controlClient.SendIntercomState(intercomMachine.State(), offer.Session, "")
 	})
@@ -797,6 +820,10 @@ func main() {
 		// path the volume arc uses to clear itself.
 		s.StartAnim(server.AnimSpec{Pattern: "off"})
 		_ = controlClient.SendIntercomState(intercom.StateIdle, session, reason)
+		// The call is over: report the true wake-stream state again,
+		// so a controller that never saw the connect's in_call
+		// report does not keep showing this Echo in a call.
+		syncListenState(dataClient, controlClient, true, false)
 	})
 
 	// Pause a flowing call for a nested HA turn, and flow it again
@@ -1606,6 +1633,24 @@ func playWakeCue(spk *speaker.PcmSpeaker) {
 	spk.PlayCue(c)
 }
 
+// playIntercomChime plays the wake two-tone at its configured level
+// whether the wake sound is on or not. It is the callee's notice that
+// its microphone just went live to a peer on an auto-answered drop-in
+// — the one audible sign of that — so the wake-sound on/off gate,
+// which is about the wake word, must not silence it. The level is
+// still the configured one: loudness is a preference, the notice is not.
+func playIntercomChime(spk *speaker.PcmSpeaker) {
+	if spk == nil {
+		return
+	}
+	_, level := config.Get().WakeSoundSetting()
+	c, ok := wakeCues[level]
+	if !ok {
+		c = wakeCues[cue.LevelMedium]
+	}
+	spk.PlayCue(c)
+}
+
 // playVolumeCue previews the newly selected device volume. PlayCue is mixed
 // after software volume (so wake sounds can stay absolute), therefore these
 // samples carry the device-volume gain themselves, under the law in force.
@@ -1717,7 +1762,16 @@ func onWakeCrossing(cc *client.ControlClient, dc *client.DataClient,
 // tells the controller when that changes (always, when force is set). Called
 // after every config push and on every connect: those are the only moments
 // the mode, the controller's features or the scorer can change.
-func syncListenState(dc *client.DataClient, cc *client.ControlClient, force bool) {
+//
+// inCall is the report override for a flowing intercom call. The wake
+// stream underneath is still local — the scorer keeps running — so the
+// resolved state is still the one applied to the mic routing. What is
+// REPORTED is "in_call" instead, so the controller (and the dashboard's
+// privacy statement) sees that the microphone is live to the peer. The
+// override lives here rather than only at the call's connect, because a
+// config push mid-call would otherwise clobber the report back to
+// "local" for the rest of the call.
+func syncListenState(dc *client.DataClient, cc *client.ControlClient, force bool, inCall bool) {
 	snap := config.Get().Snapshot()
 	state, reason := listen.Resolve(
 		client.MicUnavailable(),
@@ -1727,8 +1781,12 @@ func syncListenState(dc *client.DataClient, cc *client.ControlClient, force bool
 		shadowState.lastErr,
 	)
 	if dc.SetListenState(state) || force {
-		if err := cc.SendListenState(state, reason); err != nil {
-			log.Printf("[listen] could not report state %s: %v", state, err)
+		report, reportReason := state, reason
+		if inCall {
+			report, reportReason = listen.StateInCall, "intercom call"
+		}
+		if err := cc.SendListenState(report, reportReason); err != nil {
+			log.Printf("[listen] could not report state %s: %v", report, err)
 		}
 	}
 }

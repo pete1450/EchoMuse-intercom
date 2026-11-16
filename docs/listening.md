@@ -48,18 +48,29 @@ over the reply (barge-in) is detected on the Echo, which then opens a new
 session exactly as above. Nothing streams during the reply unless the wake word
 is heard.
 
-Only two things open the microphone without a local wake, and both are the
-user asking, or being asked, to speak: the **action button**, and a Home
+Only three things open the microphone without a local wake, and all three
+are the user asking, or being asked, to speak: the **action button**, a Home
 Assistant **follow-up question** ("continue conversation", or an
-`ask_question` / `start_conversation` action). Both use the bounded turn stream (`mic_start` with
-`lock_mic:true`), which the Echo gates on speech and ends itself after 5s of
-nothing; the controller ends it at end of speech exactly as it closes a
-session, and the Echo goes back to listening locally.
+`ask_question` / `start_conversation` action), and an **auto-answered
+drop-in** — and only on an Echo whose **Allow drop-in** setting is on
+(docs/intercom.md). The drop-in plays a chime and rings with a fast green
+pulse before the microphone goes live, so the person in the room hears that
+a call has started; the microphone then goes to the peer Echo, not to Home
+Assistant, and the callee reports the call in `listen_state` as `in_call`
+for as long as it lasts. The button and the follow-up question use the
+bounded turn stream (`mic_start` with `lock_mic:true`), which the Echo gates
+on speech and ends itself after 5s of nothing; the controller ends it at end
+of speech exactly as it closes a session, and the Echo goes back to listening
+locally.
 
 ### What is honest to claim, and what is not
 
 - Say: *audio leaves the Echo only after it hears the wake word, and only
   until you finish speaking.*
+- With Allow drop-in on, say: *an incoming drop-in also opens the
+  microphone, after a chime and a fast ring — the callee answers without its
+  own wake word.* With it off, that never happens: the callee rings and waits
+  for a press.
 - Say: *a false wake sends a few seconds of audio you did not intend.* That is
   true of every wake word system, Amazon's included, and we publish it rather
   than be caught by it.
@@ -102,6 +113,7 @@ true.
 | `diagnostic` | `shadow`, both detectors on | **yes** |
 | `legacy` | Asked for On this Echo, but the firmware predates `oww_local_only` | **yes** — says "update firmware for private listening" |
 | `degraded` | Asked for On this Echo, but the Echo cannot score (runtime or model missing, or failed to load) | no — **button only**, and says why |
+| `in_call` | In an intercom call, microphone live to the peer | **yes** — to the peer Echo, not the controller |
 | `unknown` | The Echo has not reported yet | shown as unknown, never as private |
 
 **`degraded` never falls back to streaming.** A device that cannot run its
@@ -131,7 +143,7 @@ Echo → controller, `/control`:
 
 | `type` | Fields | Meaning |
 |--------|--------|---------|
-| `listen_state` | `state` (`local`/`stream`/`degraded`), `reason?` | Sent on every change and after every `ack` |
+| `listen_state` | `state` (`local`/`stream`/`degraded`/`in_call`), `reason?` | Sent on every change and after every `ack` |
 | `oww_wake` | `score`, `threshold`, `ageMs`, **`session`**, **`floor`**, **`barge`** | A local wake opened session `session`. `ageMs` is how long ago the wake word's last frame was **captured**. `floor` is the Echo's noise floor (RMS). `barge` is true when the speaker was playing |
 | `listen_end` | `session`, `reason` | The Echo closed a session on its own (`ack_timeout`, `max_open`, `muted`, `link`) |
 

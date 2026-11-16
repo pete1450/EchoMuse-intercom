@@ -70,6 +70,13 @@ type Device struct {
 	// WakeSoundLevel is "quiet", "medium" or "loud" (internal/cue).
 	WakeSoundLevel string
 
+	// AllowDropIn answers an incoming intercom call without the action
+	// button: the callee connects itself on the offer, with a chime and
+	// a fast ring as the notice. Off by default — on, the callee's
+	// microphone opens to the peer without its own wake word (see
+	// docs/listening.md), so it is an explicit per-Echo opt-in.
+	AllowDropIn bool
+
 	// RemoteVolumeArc shows the cyan volume arc when a live remote command
 	// changes the volume. Physical buttons always show it; the boot-time
 	// volume restore never does. Off by default because an unprompted ring was
@@ -226,6 +233,7 @@ func (d *Device) loadDefaults() {
 	d.ResponseLevel = normaliseResponseLevel(envStr("RESPONSE_LEVEL", ResponseLevelLow))
 	d.WakeSound = envBool("WAKE_SOUND", false)
 	d.WakeSoundLevel = envStr("WAKE_SOUND_LEVEL", "medium")
+	d.AllowDropIn = envBool("ALLOW_DROP_IN", false)
 	d.RemoteVolumeArc = envBool("REMOTE_VOLUME_ARC", false)
 	d.AdcDigitalGain = envInt("ADC_DIGITAL_GAIN", 88)
 	d.AdcMicpga = envInt("ADC_MICPGA", 40)
@@ -308,6 +316,11 @@ func (d *Device) Apply(msg ConfigMessage) {
 	}
 	if msg.WakeSoundLevel != "" {
 		d.WakeSoundLevel = msg.WakeSoundLevel
+	}
+	// AllowDropIn: a pointer so "off" is distinguishable from absent,
+	// the same shape as WakeSound above.
+	if msg.AllowDropIn != nil {
+		d.AllowDropIn = *msg.AllowDropIn
 	}
 	if msg.VolumeButtonSound != nil {
 		d.VolumeButtonSound = *msg.VolumeButtonSound
@@ -612,6 +625,8 @@ type ConfigMessage struct {
 	// WakeSound: a pointer so "off" is distinguishable from absent.
 	WakeSound      *bool  `json:"wakeSound,omitempty"`
 	WakeSoundLevel string `json:"wakeSoundLevel,omitempty"`
+	// AllowDropIn: a pointer so "off" is distinguishable from absent.
+	AllowDropIn *bool `json:"allowDropIn,omitempty"`
 	// VolumeButtonSound: a pointer so "off" is distinguishable from absent.
 	VolumeButtonSound *bool `json:"volumeButtonSound,omitempty"`
 	// RemoteVolumeArc: a pointer so "off" is distinguishable from absent.

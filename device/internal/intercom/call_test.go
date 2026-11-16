@@ -2,6 +2,7 @@ package intercom
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"sync"
 	"testing"
@@ -140,12 +141,18 @@ type twoCalls struct {
 	micCallee      *fakeMic
 	spkCaller      *fakeSpeaker
 	spkCallee      *fakeSpeaker
+	// endedCaller / endedCallee report each end's OnEnded reason.
+	// They are wired here, before Start, because the ring timer and
+	// the peer-disconnect path read OnEnded from their own goroutines
+	// — assigning it after connect races those reads (CI runs -race).
+	endedCaller chan string
+	endedCallee chan string
 }
 
 // connectTwoCalls offers, starts and answers a call between two
 // devices, and waits until both ends report connected. The caller
 // hangs up at the end of the test via t.Cleanup.
-func connectTwoCalls(t *testing.T) *twoCalls {
+func connectTwoCalls(t *testing.T, autoAnswer bool) *twoCalls {
 	t.Helper()
 	const sessionID, token = "s1", "tok"
 	tc := &twoCalls{
@@ -166,22 +173,37 @@ func connectTwoCalls(t *testing.T) *twoCalls {
 	tc.callee = NewCall("callee", Session{ID: sessionID, Token: token, Role: RoleCallee}, tc.mCallee, tc.micCallee, tc.spkCallee)
 	tc.caller.Port = freePort(t)
 	tc.callee.Port = freePort(t)
-	if err := tc.caller.Start(); err != nil {
-		t.Fatalf("caller Start: %v", err)
-	}
-	if err := tc.callee.Start(); err != nil {
-		t.Fatalf("callee Start: %v", err)
-	}
-	// The callee dials the caller on answer.
-	tc.callee.sess.PeerAddr = peerAddr(t, tc.caller)
-	tc.caller.sess.PeerAddr = peerAddr(t, tc.callee)
+
+	// Both peer addresses are set before either Start. The ports are
+	// already chosen, so the addresses are known without starting —
+	// and they must be: with AutoAnswer the callee dials from Start
+	// itself, so the caller's acceptLoop can read its session while
+	// this function is still between the two Starts. A PeerAddr
+	// written after Start races that read (CI runs -race).
+	tc.caller.sess.PeerAddr = fmt.Sprintf("127.0.0.1:%d", tc.callee.Port)
+	tc.callee.sess.PeerAddr = fmt.Sprintf("127.0.0.1:%d", tc.caller.Port)
 
 	connectedCaller := make(chan struct{}, 1)
 	connectedCallee := make(chan struct{}, 1)
 	tc.caller.OnConnected = func() { connectedCaller <- struct{}{} }
 	tc.callee.OnConnected = func() { connectedCallee <- struct{}{} }
+	tc.endedCaller = make(chan string, 1)
+	tc.endedCallee = make(chan string, 1)
+	tc.caller.OnEnded = func(reason string) { tc.endedCaller <- reason }
+	tc.callee.OnEnded = func(reason string) { tc.endedCallee <- reason }
 
-	tc.callee.Answer()
+	if err := tc.caller.Start(); err != nil {
+		t.Fatalf("caller Start: %v", err)
+	}
+	tc.callee.AutoAnswer = autoAnswer
+	if err := tc.callee.Start(); err != nil {
+		t.Fatalf("callee Start: %v", err)
+	}
+
+	if !autoAnswer {
+		// The callee dials the caller on answer.
+		tc.callee.Answer()
+	}
 	select {
 	case <-connectedCaller:
 	case <-time.After(5 * time.Second):
@@ -222,9 +244,9 @@ func bigFrame() []byte {
 }
 
 func TestCallFullFlow(t *testing.T) {
-	tc := connectTwoCalls(t)
+	tc := connectTwoCalls(t, false)
 	mCaller, mCallee := tc.mCaller, tc.mCallee
-	cCaller, cCallee := tc.caller, tc.callee
+	cCaller := tc.caller
 	micCaller, micCallee := tc.micCaller, tc.micCallee
 	spkCaller, spkCallee := tc.spkCaller, tc.spkCallee
 
@@ -258,11 +280,9 @@ func TestCallFullFlow(t *testing.T) {
 
 	// Hanging up one end ends the other with peer_disconnected, and
 	// both machines return to idle.
-	endedCallee := make(chan string, 1)
-	cCallee.OnEnded = func(reason string) { endedCallee <- reason }
 	cCaller.Stop()
 	select {
-	case reason := <-endedCallee:
+	case reason := <-tc.endedCallee:
 		if reason != "peer_disconnected" {
 			t.Fatalf("callee ended with %q, want peer_disconnected", reason)
 		}
@@ -277,8 +297,82 @@ func TestCallFullFlow(t *testing.T) {
 	}
 }
 
+// An auto-answering callee connects itself on the offer, with no
+// button press and no explicit Answer: the helper only sets the
+// flag, and the connect it waits for is the self-dial. Audio flows
+// the same way after — the flag changes who dials, not what flows.
+func TestCallAutoAnswer(t *testing.T) {
+	tc := connectTwoCalls(t, true)
+
+	frame := bigFrame()
+	for i := 0; i < 3; i++ {
+		tc.micCallee.emit(frame)
+	}
+	waitFor(t, "caller to hear auto-answered callee", func() bool {
+		return len(tc.spkCaller.bytes()) >= 18
+	})
+	if got := tc.spkCaller.bytes(); len(got) < 18 {
+		t.Fatalf("caller heard %d bytes, want >= 18", len(got))
+	}
+}
+
+// AutoAnswer on the caller is a no-op: only the callee answers, so
+// the caller waits to be dialled exactly as it does without the
+// flag, and the attempt ends on the ring timeout rather than by
+// connecting itself.
+func TestCallAutoAnswerOnCallerIsANoop(t *testing.T) {
+	tc := &twoCalls{
+		mCaller:   NewMachine(),
+		mCallee:   NewMachine(),
+		micCaller: &fakeMic{},
+		micCallee: &fakeMic{},
+		spkCaller: &fakeSpeaker{},
+		spkCallee: &fakeSpeaker{},
+	}
+	const sessionID, token = "s1", "tok"
+	if err := tc.mCaller.Offer(Session{ID: sessionID, Role: RoleCaller}); err != nil {
+		t.Fatalf("caller Offer: %v", err)
+	}
+	if err := tc.mCallee.Offer(Session{ID: sessionID, Token: token, Role: RoleCallee}); err != nil {
+		t.Fatalf("callee Offer: %v", err)
+	}
+	tc.caller = NewCall("caller", Session{ID: sessionID, Token: token, Role: RoleCaller}, tc.mCaller, tc.micCaller, tc.spkCaller)
+	tc.callee = NewCall("callee", Session{ID: sessionID, Token: token, Role: RoleCallee}, tc.mCallee, tc.micCallee, tc.spkCallee)
+	tc.caller.Port = freePort(t)
+	tc.callee.Port = freePort(t)
+	tc.caller.RingTimeout = 200 * time.Millisecond
+	tc.callee.RingTimeout = 200 * time.Millisecond
+	tc.caller.AutoAnswer = true
+	// OnEnded before Start: the ring timer fires end() from its own
+	// goroutine, which reads OnEnded — assigning it after Start
+	// races that read (CI runs -race).
+	ended := make(chan string, 1)
+	tc.caller.OnEnded = func(reason string) { ended <- reason }
+	if err := tc.caller.Start(); err != nil {
+		t.Fatalf("caller Start: %v", err)
+	}
+	if err := tc.callee.Start(); err != nil {
+		t.Fatalf("callee Start: %v", err)
+	}
+	t.Cleanup(func() {
+		tc.caller.Stop()
+		tc.callee.Stop()
+	})
+	select {
+	case reason := <-ended:
+		if reason != "no_answer" {
+			t.Fatalf("caller ended with %q, want no_answer", reason)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("caller never timed out")
+	}
+	if got := tc.mCaller.State(); got != StateIdle {
+		t.Fatalf("caller state = %q, want idle", got)
+	}
+}
+
 func TestCallSuspendResume(t *testing.T) {
-	tc := connectTwoCalls(t)
+	tc := connectTwoCalls(t, false)
 	// The low prime is on from the moment audio flows.
 	if !tc.spkCaller.mode() || !tc.spkCallee.mode() {
 		t.Fatalf("intercom mode not set on connect (caller=%v callee=%v)",

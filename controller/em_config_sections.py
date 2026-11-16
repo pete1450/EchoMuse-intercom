@@ -77,6 +77,10 @@ SECTIONS: dict[str, dict] = {
         "label": "Sendspin",
         "keys": ["sendspinEnabled", "sendspinUnpaired"],
     },
+    "intercom": {
+        "label": "Intercom",
+        "keys": ["allowDropIn"],
+    },
 }
 
 # Keys that live in the config dict but are NOT user-facing settings, and so

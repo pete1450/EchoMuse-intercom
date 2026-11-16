@@ -15,16 +15,23 @@ audio flows device to device and never crosses the controller or Home
 Assistant — Home Assistant's `assist_satellite` API has no intercom
 concept.
 
+Calls start from Home Assistant, not from the dashboard: a sentence
+("drop in on lounge") or an automation calls the calling Echo's
+`drop_in` service, and "hang up" — spoken, or the action button — ends
+it (Phase 4). The dashboard API underneath still exists, but it is the
+fallback, not the front door.
+
 Sendspin is the precedent for this shape: a device-resident mode the
 controller switches, with its own port and its own session state.
 
 ## Phase 1 — the mode switch (done)
 
 Phase 1 carries no audio. What it proves is that the switch itself is
-solid: a call can be started and ended from the dashboard, both devices
+solid: a call can be started and ended by the controller, both devices
 enter and leave the mode together, the in-call ring shows, and nothing
 gets stuck — no wedged speaker, no lost wake word, no call that survives
-its switchboard.
+its switchboard. (Phase 1's front door was the dashboard API; Phase 4
+moves it to Home Assistant — the switch underneath is unchanged.)
 
 - The device announces the `intercom` capability at registration.
 - The controller offers a call to both devices with `intercom_offer`
@@ -58,9 +65,12 @@ cancellation holds under continuous two-way speech on real hardware.
   to 30 s; a Dot press answers — the device dials the caller itself,
   and the press is consumed on the device rather than forwarded, so it
   cannot also start a voice turn. A Dot press on the caller while it
-  waits cancels the attempt. There is no auto-answer yet: the safe
-  default is to ring and wait for a human. A ring that times out ends
-  the attempt for both ends.
+  waits cancels the attempt. Ring-and-press is the default. A ring that
+  times out ends the attempt for both ends. Auto-answer is a per-Echo
+  opt-in (Phase 4): with **Allow drop-in** on, the callee answers
+  itself with a chime and a fast green pulse, and its microphone opens
+  without its own wake word — see docs/listening.md for the exception
+  that writes into the listening rules.
 - **Handshake and auth.** The dialler opens with `EMIC`, version 1,
   the session id, the controller-issued token, and its own device id;
   the listener accepts only the session it was offered and only the
@@ -108,7 +118,10 @@ offer (re-offering the same session is a no-op); `ringing` / `calling →
 in_call` when the peer link comes up; `in_call → suspended → in_call`
 around a nested turn; anything `→ idle` on end. Ending when idle is a
 no-op. The ring is a slow green pulse while the call is being
-attempted, solid green once it is flowing.
+attempted, solid green once it is flowing. An auto-answered attempt
+(Allow drop-in on) rings with a **fast** green pulse (500 ms) instead
+of the slow one, so the room can tell the callee answered itself —
+the pulse is the visible half of the chime's notice.
 
 ### Controller session
 
@@ -128,7 +141,7 @@ one device fails after the other was offered, the session is ended
 immediately so no device is left in a call the controller does not
 know about.
 
-## Phase 3 — conversational latency and voice control (this phase)
+## Phase 3 — conversational latency and voice control (done)
 
 Phase 3 makes the call conversational. Three changes, all in the
 audio path and the turn:
@@ -186,9 +199,62 @@ audio path and the turn:
   answers; a tap while calling cancels. Button hangup is the one
   hangup that works while muted, because the button event flows over
   the control plane whatever the mic state is.
-- **Mute:** a muted device never calls and never auto-answers (there is
-  no auto-answer yet). Mute is device-sovereign: the controller cannot
-  unmute a device, and a muted device cannot be called.
+- **Mute:** a muted device never calls and never auto-answers. Mute is
+  device-sovereign: the controller cannot unmute a device, and a muted
+  device cannot be called.
+
+## Phase 4 — Home Assistant first (done)
+
+Phase 4 moves the front door to Home Assistant. Nothing in the call
+itself changes — the switchboard lifecycle, teardown on link loss, the
+per-call token and the post-AEC peer audio are exactly as Phases 1–3
+built them. What changes is who may start and end a call, and how the
+callee answers.
+
+- **Services, not a custom integration.** Each Echo exposes two
+  ESPHome user-defined services, gated on the `intercom` capability,
+  so a Home Assistant sentence automation can call them with no custom
+  integration: `drop_in` takes one `target` (the peer device id) and
+  `hang_up` takes nothing. `drop_in` fails if the target is missing,
+  offline, or the caller itself; `hang_up` with no call is a
+  successful no-op, so an automation can call it unconditionally.
+  The services are listed to HA only on intercom-capable firmware,
+  and the controller answers each call with success or an error
+  message HA can log.
+- **A sentence automation.** One automation per calling Echo (or an
+  area slot — HA has no intercom concept, so there is no built-in
+  "which Echo am I" in the sentence):
+
+  ```yaml
+  automation:
+    - alias: "Drop in on the lounge"
+      trigger:
+        - platform: conversation
+          command: "drop in on lounge"
+      action:
+        - service: esphome.kitchen_drop_in
+          data:
+            target: lounge
+  ```
+
+  The service name is the calling Echo's — `esphome.<device>_drop_in` —
+  and `target` is the callee's device id. Saying "hang up" still goes
+  through the Phase 3 voice intercept (STT_END, whole-transcript
+  match): the `hang_up` service is the automation path, for an
+  automation that ends a call, or a dashboard button, without speaking.
+- **Allow drop-in.** A per-Echo setting (`allowDropIn`, off by
+  default, in the dashboard's Intercom stage, gated on the capability)
+  that auto-answers: the callee plays a chime and rings with a fast
+  green pulse, then its microphone opens without its own wake word.
+  The chime is the callee's only audible notice that its mic went
+  live, so it plays even when the wake sound is off — the level still
+  respects the setting. Off, the callee rings and waits for a press,
+  exactly as Phase 2.
+- **Reporting.** The callee reports the call in `listen_state` as
+  `in_call` for as long as it lasts (docs/listening.md), so the
+  dashboard shows the microphone is live to the peer rather than
+  keeping showing private listening. The report is the state the
+  device is in; it changes nothing about mic routing.
 
 ### API
 
@@ -198,6 +264,9 @@ audio path and the turn:
   ends whatever call the device is in. Admin only.
 - `GET /api/devices` surfaces `intercomCapable`, `intercom` (the
   device's last reported state), `intercomSession` and `intercomPeer`.
+
+The API is the fallback now, not the front door: the services above
+are how calls are meant to start and end.
 
 ## What is not built yet
 
@@ -212,8 +281,6 @@ audio path and the turn:
   writes to the same voice plane as peer audio, so the two interleave
   for the length of the announcement. Suppression or queueing during
   calls is not built yet.
-
-Auto-answer (a per-device opt-in to answer without the button) is not
-built either: ringing plus the button is the consent model, and
-auto-answer needs a config knob plus a dashboard toggle before it
-means anything.
+- **Dashboard call UI:** calls start and end from Home Assistant or
+  the API; the dashboard has no call button or in-call view. The
+  Intercom config stage (Allow drop-in) is the only dashboard surface.
